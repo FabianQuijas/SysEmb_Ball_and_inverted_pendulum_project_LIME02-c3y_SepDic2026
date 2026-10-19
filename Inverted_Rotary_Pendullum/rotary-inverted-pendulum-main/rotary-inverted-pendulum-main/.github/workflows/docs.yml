@@ -1,0 +1,116 @@
+name: Documentation site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'model/**'
+      - 'firmware/RLControl/**'
+      - 'policy/pendulum_env.py'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'firmware/RLControl/**'
+      - '.github/workflows/docs.yml'
+  # Allow a manual redeploy without an intervening commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: website
+
+jobs:
+  # The demo's claim is that the network flashed on the Nano balances the
+  # pendulum. These tests run the same modules the browser does, so a broken
+  # control loop or a newly-exported policy that does not balance fails CI
+  # instead of quietly shipping a spinning pendulum to the front page.
+  test:
+    name: Verify the demo
+    runs-on: ubuntu-latest
+    # A hung headless browser should not burn half an hour of runner time.
+    timeout-minutes: 20
+    # Superseded verification runs are worth cancelling; superseded *deploys*
+    # are not, so the concurrency groups are per-job rather than workflow-wide.
+    concurrency:
+      group: docs-test-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Kept at 22 to match local development. Note this is what pins the
+          # runner's npm to 10.x — see the lockfile comment below.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      # `npm ci` is strict about the lockfile, and npm versions disagree about
+      # which platform-specific optional dependencies must be listed: a lockfile
+      # written by npm 11 was rejected by the npm 10 that Node 22 ships, for
+      # missing two transitive optional deps of `sharp`. If this step fails that
+      # way again, reconcile the lockfile with `npx npm@10 install` (which adds
+      # the entries without changing any resolved version) rather than loosening
+      # this to `npm install`.
+      - run: npm ci
+
+      - name: Prepare generated content
+        run: node scripts/prepare.mjs
+
+      - name: The policy still balances
+        run: npm run test:policy
+
+      - name: The 3D transform chain is correct
+        run: npm run test:geometry
+
+      # Cheap: no browser, no build — it reads the step list, the content files
+      # and the sidebar. Catches a renamed step page, which would otherwise ship
+      # a pipeline strip that links to a 404 and highlights nothing.
+      - name: The pipeline steps line up with the pages
+        run: npm run test:pipeline
+
+      - name: Build the site
+        run: npm run build
+
+      - name: The demo works in a real browser
+        run: |
+          npx astro preview --port 4322 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4322/rotary-inverted-pendulum/ >/dev/null && break
+            sleep 1
+          done
+          # Pass the URL explicitly — the test's default port is 4321, and a
+          # silent mismatch here tests a dead port rather than the site.
+          npm run test:smoke -- http://localhost:4322/rotary-inverted-pendulum/
+
+      - name: Upload the built site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Only main deploys; pull requests get the verification above and nothing more.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Never cancel a deploy in flight — a half-applied Pages deployment is worse
+    # than a slightly stale one. Queue them instead.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,12 @@
+# Large binaries live in Git LFS. The rules are path-scoped rather than
+# extension-scoped for `hardware/` because that tree is all binary source art
+# (.drawio) and exports (.png/.jpg); the meshes are matched by extension so they
+# stay in LFS wherever they sit.
+#
+# Anything the *website* renders must stay OUT of these paths: CI's checkout does
+# not fetch LFS objects, so an LFS-backed image publishes as a ~130-byte text
+# pointer served with an image MIME type — a 200 that renders broken. That is why
+# the wiring photo the electronics page uses lives in `website/src/assets/`.
+# `tests/doc_assets.test.mts` fails the build if that rule is broken again.
+*.stl filter=lfs diff=lfs merge=lfs -text
+hardware/** filter=lfs diff=lfs merge=lfs -text
